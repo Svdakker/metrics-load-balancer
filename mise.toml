@@ -1,2 +1,27 @@
 [tools]
-go = "1.25.1"
+go = "latest"
+"go:honnef.co/go/tools/cmd/staticcheck" = "latest"
+
+[tasks.fmt]
+description = "Format Go code and fix imports"
+run = "go fmt ./..."
+
+[tasks.lint]
+description = "Run static analysis"
+run = "staticcheck ./..."
+
+[tasks.build]
+description = "Compile the daemon binary"
+run = "go build -o bin/mlb ./cmd/mlb"
+
+[tasks.test]
+description = "Run go tests"
+run = "go test -v ./..."
+
+[tasks.install]
+description = "Install the binary to your local bin"
+depends = ["build"]
+run = """
+cp bin/mlb ~/.local/bin/mlb
+"""
+

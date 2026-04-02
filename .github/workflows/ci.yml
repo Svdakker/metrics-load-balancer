@@ -1,4 +1,4 @@
-name: Main CI kp-daemon
+name: Main CI metrics-load-balancer 
 on: [push, pull_request]
 jobs:
   test:
