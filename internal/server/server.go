@@ -3,12 +3,16 @@ package server
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/golang/snappy"
+	"github.com/prometheus/prometheus/prompb"
 )
 
 type HttpReceiver struct {
@@ -67,8 +71,30 @@ func healthCheck(w http.ResponseWriter, r *http.Request) {
 
 func handleRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed, only POST method is supported", http.StatusMethodNotAllowed)
 		return
 	}
+
+	compressed, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read body", http.StatusInternalServerError)
+		return
+	}
+	defer r.Body.Close()
+
+	uncompressed, err := snappy.Decode(nil, compressed)
+	if err != nil {
+		http.Error(w, "Failed to decompress Snappy payload", http.StatusBadRequest)
+		return
+	}
+
+	var req prompb.WriteRequest
+	if err := req.Unmarshal(uncompressed); err != nil {
+		http.Error(w, "Failed to unmarshal Protobuf", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("Successfully unpacked %d timeseries", len(req.Timeseries))
+
 	w.WriteHeader(http.StatusAccepted)
 }
