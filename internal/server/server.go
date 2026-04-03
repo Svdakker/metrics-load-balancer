@@ -48,7 +48,7 @@ func (s *HttpReceiver) Start() {
 	go func() {
 		slog.Info("Starting metrics-load-balancer", "port", s.httpServer.Addr)
 		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("Could not listen on %s: %v\n", s.httpServer.Addr, err)
+			slog.Error("Could not start listener", "address", s.httpServer.Addr, "error", err)
 		}
 	}()
 
@@ -66,7 +66,7 @@ func (s *HttpReceiver) waitForShutdown() {
 	defer cancel()
 
 	if err := s.httpServer.Shutdown(ctx); err != nil {
-		slog.Error("Server forced to shutdown: %v", err)
+		slog.Error("Server forced to shutdown", "error", err)
 	}
 
 	slog.Info("Server exited cleanly.")
@@ -125,7 +125,7 @@ func (s *HttpReceiver) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if finalErr != nil {
-		slog.Error("Dispatch failure: %v", finalErr)
+		slog.Error("Dispatch failure", slog.Any("error", finalErr))
 		http.Error(w, "Error forwarding metrics", http.StatusBadGateway)
 		return
 	}
