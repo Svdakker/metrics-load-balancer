@@ -1,6 +1,7 @@
 package sharder
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/prometheus/prometheus/prompb"
@@ -96,5 +97,58 @@ func TestSharder_Distribution(t *testing.T) {
 
 	if totalRouted != 5 {
 		t.Errorf("Expected exactly 5 timeseries to be routed, got %d", totalRouted)
+	}
+}
+
+func TestHashRing_Distribution(t *testing.T) {
+	backends := []string{"http://node-1", "http://node-2", "http://node-3"}
+	s := New(backends)
+
+	distribution := make(map[string]int)
+
+	req := &prompb.WriteRequest{}
+	for i := 0; i < 10000; i++ {
+		ts := prompb.TimeSeries{
+			Labels: []prompb.Label{{Name: "test_idx", Value: fmt.Sprintf("%d", i)}},
+		}
+		req.Timeseries = append(req.Timeseries, ts)
+	}
+
+	result := s.Shard(req)
+
+	for backend, batch := range result {
+		distribution[backend] = len(batch.Timeseries)
+	}
+
+	expected := 10000 / len(backends)
+	variance := float64(expected) * 0.15
+
+	for backend, count := range distribution {
+		if float64(count) < float64(expected)-variance || float64(count) > float64(expected)+variance {
+			t.Errorf("Backend %s received %d metrics, expected ~%d. Variance too high.", backend, count, expected)
+		}
+	}
+}
+
+func TestHashRing_WrapAround(t *testing.T) {
+	s := New([]string{"node-1"})
+
+	s.ringKeys = []uint32{100, 200, 300}
+	s.ringMap = map[uint32]string{
+		100: "node-A",
+		200: "node-B",
+		300: "node-C",
+	}
+
+	if s.getBackend(200) != "node-B" {
+		t.Errorf("Expected node-B")
+	}
+
+	if s.getBackend(250) != "node-C" {
+		t.Errorf("Expected node-C")
+	}
+
+	if s.getBackend(350) != "node-A" {
+		t.Errorf("Expected wrap-around to node-A, got %s", s.getBackend(350))
 	}
 }

@@ -9,12 +9,12 @@ import (
 	"github.com/prometheus/prometheus/prompb"
 
 	"github.com/Svdakker/metrics-load-balancer/internal/client"
+	"github.com/Svdakker/metrics-load-balancer/internal/dispatcher"
 	"github.com/Svdakker/metrics-load-balancer/internal/sharder"
 )
 
 func TestHealthCheck(t *testing.T) {
-
-	srv := New("8080", nil, nil)
+	srv := New("8080", nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rr := httptest.NewRecorder()
 
@@ -28,7 +28,8 @@ func TestHealthCheck(t *testing.T) {
 func TestHandleRequest_InvalidMethod(t *testing.T) {
 	s := sharder.New([]string{"http://localhost:9090"})
 	c := client.New()
-	srv := New("8080", s, c)
+	d := dispatcher.New(c, 1, 10)
+	srv := New("8080", s, c, d)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/metrics/write", nil)
 	rr := httptest.NewRecorder()
@@ -49,7 +50,10 @@ func TestHandleRequest_ValidPayload(t *testing.T) {
 
 	s := sharder.New([]string{mockBackend.URL})
 	c := client.New()
-	srv := New("8080", s, c)
+	d := dispatcher.New(c, 2, 10)
+	d.Start()
+
+	srv := New("8080", s, c, d)
 
 	testReq := &prompb.WriteRequest{
 		Timeseries: []prompb.TimeSeries{
@@ -75,7 +79,10 @@ func TestHandleRequest_ValidPayload(t *testing.T) {
 func TestHandleRequest_InvalidSnappy(t *testing.T) {
 	s := sharder.New([]string{"http://localhost:9090"})
 	c := client.New()
-	srv := New("8080", s, c)
+	d := dispatcher.New(c, 2, 10)
+	d.Start()
+
+	srv := New("8080", s, c, d)
 
 	garbageData := []byte("this is not compressed data")
 

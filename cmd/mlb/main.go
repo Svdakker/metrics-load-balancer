@@ -4,6 +4,7 @@ import (
 	"os"
 
 	"github.com/Svdakker/metrics-load-balancer/internal/client"
+	"github.com/Svdakker/metrics-load-balancer/internal/dispatcher"
 	"github.com/Svdakker/metrics-load-balancer/internal/server"
 	"github.com/Svdakker/metrics-load-balancer/internal/sharder"
 )
@@ -16,11 +17,15 @@ func main() {
 
 	backends := []string{
 		"http://localhost:8080/api/v1/metrics/write",
+		"http://localhost:8082/api/v1/metrics/write",
 	}
 
 	routerSharder := sharder.New(backends)
 	routerClient := client.New()
 
-	receiver := server.New(port, routerSharder, routerClient)
+	routerDispatcher := dispatcher.New(routerClient, 50, 1000)
+	routerDispatcher.Start()
+
+	receiver := server.New(port, routerSharder, routerClient, routerDispatcher)
 	receiver.Start()
 }

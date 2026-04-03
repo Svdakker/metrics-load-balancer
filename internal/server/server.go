@@ -10,9 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/prometheus/prometheus/prompb"
-
 	"github.com/Svdakker/metrics-load-balancer/internal/client"
+	"github.com/Svdakker/metrics-load-balancer/internal/dispatcher"
 	"github.com/Svdakker/metrics-load-balancer/internal/sharder"
 )
 
@@ -20,12 +19,14 @@ type HttpReceiver struct {
 	httpServer *http.Server
 	sharder    *sharder.Sharder
 	client     *client.Client
+	dispatcher *dispatcher.Dispatcher
 }
 
-func New(port string, s *sharder.Sharder, c *client.Client) *HttpReceiver {
+func New(port string, s *sharder.Sharder, c *client.Client, d *dispatcher.Dispatcher) *HttpReceiver {
 	receiver := &HttpReceiver{
-		sharder: s,
-		client:  c,
+		sharder:    s,
+		client:     c,
+		dispatcher: d,
 	}
 
 	mux := http.NewServeMux()
@@ -88,31 +89,30 @@ func (s *HttpReceiver) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-  log.Printf("INCOMING: Received %d timeseries from %s", len(req.Timeseries), r.RemoteAddr)
+	log.Printf("INCOMING: Received %d timeseries from %s", len(req.Timeseries), r.RemoteAddr)
 
 	shardedBatches := s.sharder.Shard(req)
 	errChan := make(chan error, len(shardedBatches))
+	jobsSubmitted := 0
 
 	for url, batch := range shardedBatches {
 		if len(batch.Timeseries) == 0 {
-			errChan <- nil
 			continue
 		}
 
-    log.Printf("FORWARDING: Sending %d timeseries to %s", len(batch.Timeseries), url)
+		log.Printf("FORWARDING: Queueing %d timeseries for %s", len(batch.Timeseries), url)
 
-		go func(target string, writeReq *prompb.WriteRequest) {
-			payload, err := s.client.Pack(writeReq)
-			if err != nil {
-				errChan <- err
-				return
-			}
-			errChan <- s.client.Push(r.Context(), target, payload)
-		}(url, batch)
+		jobsSubmitted++
+		s.dispatcher.Submit(dispatcher.Job{
+			Ctx:     r.Context(),
+			Target:  url,
+			Payload: batch,
+			Result:  errChan,
+		})
 	}
 
 	var finalErr error
-	for i := 0; i < len(shardedBatches); i++ {
+	for i := 0; i < jobsSubmitted; i++ {
 		if err := <-errChan; err != nil {
 			finalErr = err
 		}
