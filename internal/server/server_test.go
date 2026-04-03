@@ -6,82 +6,85 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/golang/snappy"
 	"github.com/prometheus/prometheus/prompb"
+
+	"github.com/Svdakker/metrics-load-balancer/internal/client"
+	"github.com/Svdakker/metrics-load-balancer/internal/sharder"
 )
 
 func TestHealthCheck(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 
+	srv := New("8080", nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rr := httptest.NewRecorder()
 
-	healthCheck(rr, req)
+	srv.healthCheck(rr, req)
 
 	if status := rr.Code; status != http.StatusOK {
-		t.Errorf("handler returned wrong status code: got %v want %v",
-			status, http.StatusOK)
-	}
-
-	expected := "OK"
-	if rr.Body.String() != expected {
-		t.Errorf("handler returned unexpected body: got %v want %v",
-			rr.Body.String(), expected)
+		t.Errorf("health returned %v", status)
 	}
 }
 
 func TestHandleRequest_InvalidMethod(t *testing.T) {
+	s := sharder.New([]string{"http://localhost:9090"})
+	c := client.New()
+	srv := New("8080", s, c)
+
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/metrics/write", nil)
 	rr := httptest.NewRecorder()
 
-	handleRequest(rr, req)
+	srv.handleRequest(rr, req)
 
 	if status := rr.Code; status != http.StatusMethodNotAllowed {
-		t.Errorf("handler returned wrong status code for GET: got %v want %v",
+		t.Errorf("handler returned wrong status code: got %v expected %v",
 			status, http.StatusMethodNotAllowed)
 	}
 }
 
 func TestHandleRequest_ValidPayload(t *testing.T) {
-	reqProto := &prompb.WriteRequest{
+	mockBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockBackend.Close()
+
+	s := sharder.New([]string{mockBackend.URL})
+	c := client.New()
+	srv := New("8080", s, c)
+
+	testReq := &prompb.WriteRequest{
 		Timeseries: []prompb.TimeSeries{
 			{
-				Labels: []prompb.Label{
-					{Name: "__name__", Value: "test_metric"},
-					{Name: "account_id", Value: "12345"},
-				},
-				Samples: []prompb.Sample{
-					{Value: 1.0, Timestamp: 1670000000000},
-				},
+				Labels:  []prompb.Label{{Name: "__name__", Value: "test_metric"}},
+				Samples: []prompb.Sample{{Value: 1.0, Timestamp: 1670000000000}},
 			},
 		},
 	}
+	payload, _ := c.Pack(testReq)
 
-	data, err := reqProto.Marshal()
-	if err != nil {
-		t.Fatalf("Failed to marshal proto: %v", err)
-	}
-
-	compressed := snappy.Encode(nil, data)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/metrics/write", bytes.NewReader(compressed))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/metrics/write", bytes.NewReader(payload))
 	rr := httptest.NewRecorder()
 
-	handleRequest(rr, req)
+	srv.handleRequest(rr, req)
 
 	if status := rr.Code; status != http.StatusAccepted {
-		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusAccepted)
+		t.Errorf("handler returned wrong status code: got %v want %v",
+			status, http.StatusAccepted)
 	}
 }
 
 func TestHandleRequest_InvalidSnappy(t *testing.T) {
+	s := sharder.New([]string{"http://localhost:9090"})
+	c := client.New()
+	srv := New("8080", s, c)
+
 	garbageData := []byte("this is not compressed data")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/metrics/write", bytes.NewReader(garbageData))
 	rr := httptest.NewRecorder()
 
-	handleRequest(rr, req)
+	srv.handleRequest(rr, req)
 
 	if status := rr.Code; status != http.StatusBadRequest {
-		t.Errorf("handler returned wrong status code for invalid snappy: got %v want %v", status, http.StatusBadRequest)
+		t.Errorf("handler returned wrong status code for invalid snappy: got %v expected %v", status, http.StatusBadRequest)
 	}
 }

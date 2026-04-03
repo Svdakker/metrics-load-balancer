@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -11,29 +10,37 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/golang/snappy"
 	"github.com/prometheus/prometheus/prompb"
+
+	"github.com/Svdakker/metrics-load-balancer/internal/client"
+	"github.com/Svdakker/metrics-load-balancer/internal/sharder"
 )
 
 type HttpReceiver struct {
 	httpServer *http.Server
+	sharder    *sharder.Sharder
+	client     *client.Client
 }
 
-func New(port string) *HttpReceiver {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/health", healthCheck)
-	mux.HandleFunc("/api/v1/metrics/write", handleRequest)
-
-	return &HttpReceiver{
-		httpServer: &http.Server{
-			Addr:         fmt.Sprintf(":%s", port),
-			Handler:      mux,
-			ReadTimeout:  10 * time.Second,
-			WriteTimeout: 10 * time.Second,
-			IdleTimeout:  60 * time.Second,
-		},
+func New(port string, s *sharder.Sharder, c *client.Client) *HttpReceiver {
+	receiver := &HttpReceiver{
+		sharder: s,
+		client:  c,
 	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", receiver.healthCheck)
+	mux.HandleFunc("/api/v1/metrics/write", receiver.handleRequest)
+
+	receiver.httpServer = &http.Server{
+		Addr:         fmt.Sprintf(":%s", port),
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	return receiver
 }
 
 func (s *HttpReceiver) Start() {
@@ -64,37 +71,58 @@ func (s *HttpReceiver) waitForShutdown() {
 	log.Println("Server exited cleanly.")
 }
 
-func healthCheck(w http.ResponseWriter, r *http.Request) {
+func (s *HttpReceiver) healthCheck(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
 }
 
-func handleRequest(w http.ResponseWriter, r *http.Request) {
+func (s *HttpReceiver) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed, only POST method is supported", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	compressed, err := io.ReadAll(r.Body)
+	req, err := s.client.Decode(r.Body)
 	if err != nil {
-		http.Error(w, "Failed to read body", http.StatusInternalServerError)
-		return
-	}
-	defer r.Body.Close()
-
-	uncompressed, err := snappy.Decode(nil, compressed)
-	if err != nil {
-		http.Error(w, "Failed to decompress Snappy payload", http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	var req prompb.WriteRequest
-	if err := req.Unmarshal(uncompressed); err != nil {
-		http.Error(w, "Failed to unmarshal Protobuf", http.StatusBadRequest)
-		return
+  log.Printf("INCOMING: Received %d timeseries from %s", len(req.Timeseries), r.RemoteAddr)
+
+	shardedBatches := s.sharder.Shard(req)
+	errChan := make(chan error, len(shardedBatches))
+
+	for url, batch := range shardedBatches {
+		if len(batch.Timeseries) == 0 {
+			errChan <- nil
+			continue
+		}
+
+    log.Printf("FORWARDING: Sending %d timeseries to %s", len(batch.Timeseries), url)
+
+		go func(target string, writeReq *prompb.WriteRequest) {
+			payload, err := s.client.Pack(writeReq)
+			if err != nil {
+				errChan <- err
+				return
+			}
+			errChan <- s.client.Push(r.Context(), target, payload)
+		}(url, batch)
 	}
 
-	log.Printf("Successfully unpacked %d timeseries", len(req.Timeseries))
+	var finalErr error
+	for i := 0; i < len(shardedBatches); i++ {
+		if err := <-errChan; err != nil {
+			finalErr = err
+		}
+	}
+
+	if finalErr != nil {
+		log.Printf("Dispatch failure: %v", finalErr)
+		http.Error(w, "Error forwarding metrics", http.StatusBadGateway)
+		return
+	}
 
 	w.WriteHeader(http.StatusAccepted)
 }
