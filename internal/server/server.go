@@ -3,7 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -46,9 +46,9 @@ func New(port string, s *sharder.Sharder, c *client.Client, d *dispatcher.Dispat
 
 func (s *HttpReceiver) Start() {
 	go func() {
-		log.Printf("Starting metrics-load-balancer on port %s...", s.httpServer.Addr)
+		slog.Info("Starting metrics-load-balancer", "port", s.httpServer.Addr)
 		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Could not listen on %s: %v\n", s.httpServer.Addr, err)
+			slog.Error("Could not listen on %s: %v\n", s.httpServer.Addr, err)
 		}
 	}()
 
@@ -60,16 +60,16 @@ func (s *HttpReceiver) waitForShutdown() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Shutdown signal received. Shutting down gracefully...")
+	slog.Info("Shutdown signal received. Shutting down gracefully...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := s.httpServer.Shutdown(ctx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
+		slog.Error("Server forced to shutdown: %v", err)
 	}
 
-	log.Println("Server exited cleanly.")
+	slog.Info("Server exited cleanly.")
 }
 
 func (s *HttpReceiver) healthCheck(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +89,10 @@ func (s *HttpReceiver) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("INCOMING: Received %d timeseries from %s", len(req.Timeseries), r.RemoteAddr)
+	slog.Info("INCOMING",
+		"count", len(req.Timeseries),
+		"from", r.RemoteAddr,
+	)
 
 	shardedBatches := s.sharder.Shard(req)
 	errChan := make(chan error, len(shardedBatches))
@@ -100,7 +103,10 @@ func (s *HttpReceiver) handleRequest(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		log.Printf("FORWARDING: Queueing %d timeseries for %s", len(batch.Timeseries), url)
+		slog.Info("FORWARDING",
+			"count", len(batch.Timeseries),
+			"target", url,
+		)
 
 		jobsSubmitted++
 		s.dispatcher.Submit(dispatcher.Job{
@@ -119,7 +125,7 @@ func (s *HttpReceiver) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if finalErr != nil {
-		log.Printf("Dispatch failure: %v", finalErr)
+		slog.Error("Dispatch failure: %v", finalErr)
 		http.Error(w, "Error forwarding metrics", http.StatusBadGateway)
 		return
 	}
